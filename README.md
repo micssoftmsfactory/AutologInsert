@@ -116,7 +116,8 @@ Get-Content .\input.java | node .\src\cli.js -java > output.java
 - C の入力は現在、フォールバックとして C++ の tree-sitter grammar を使用します。
 - C# は現在、tree-sitter ではなくトークンベースのフォールバック処理を使用します。
 - `javascript` は、この Node.js runtime で tree-sitter の 32,767 文字制限を超える入力に対して、自動でトークンベースのフォールバック処理へ切り替えます。
-- `java` / `c` / `cpp` の tree-sitter 経路は、この Node.js runtime では 32,767 文字を超える入力で失敗することがあります。
+- `c` / `cpp` は、この Node.js runtime で tree-sitter の 32,767 文字制限を超える入力に対して、自動でトークンベースのフォールバック処理へ切り替えます。
+- `java` の tree-sitter 経路は、この Node.js runtime では 32,767 文字を超える入力で失敗することがあります。
 - フォールバック処理が使われた場合、警告は標準エラー出力へ出力されます。
 - `package.json` には `"private": true` が設定されているため、現状は npm 公開ではなく GitHub 公開を前提としています。
 

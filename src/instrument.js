@@ -119,8 +119,16 @@ function instrumentSource(source, language, context = {}) {
       }
       return instrumentTreeSitterSource(source, language, instrumentContext);
     case "java":
+      return instrumentTreeSitterSource(source, language, instrumentContext);
     case "cpp":
+      if (source.length > TREE_SITTER_SOURCE_LENGTH_LIMIT) {
+        return instrumentLargeBraceLanguageSource(source, "cpp", instrumentContext);
+      }
+      return instrumentTreeSitterSource(source, language, instrumentContext);
     case "c":
+      if (source.length > TREE_SITTER_SOURCE_LENGTH_LIMIT) {
+        return instrumentLargeBraceLanguageSource(source, "c", instrumentContext);
+      }
       return instrumentTreeSitterSource(source, language, instrumentContext);
     case "php":
       return instrumentPhpSource(source, instrumentContext);
@@ -147,6 +155,13 @@ function instrumentLargeJavascriptSource(source, context) {
   return instrumentBraceLanguageSource(source, "javascript", context, {
     warningMessage:
       `JavaScript input exceeded the tree-sitter limit of ${TREE_SITTER_SOURCE_LENGTH_LIMIT} characters, so a token-based fallback was used.`,
+  });
+}
+
+function instrumentLargeBraceLanguageSource(source, language, context) {
+  return instrumentBraceLanguageSource(source, language, context, {
+    warningMessage:
+      `${language.toUpperCase()} input exceeded the tree-sitter limit of ${TREE_SITTER_SOURCE_LENGTH_LIMIT} characters, so a token-based fallback was used.`,
   });
 }
 
@@ -1514,7 +1529,7 @@ function applyInsertions(source, insertions) {
 
 function tokenizeBraceLanguage(source) {
   const tokens = [];
-  const symbols = new Set(["{", "}", "(", ")", "[", "]", ";", ",", ".", ":", "=", ">", "<", "+", "-", "*", "/", "!", "?"]);
+  const symbols = new Set(["{", "}", "(", ")", "[", "]", ";", ",", ".", ":", "=", ">", "<", "+", "-", "*", "/", "!", "?", "&", "|", "%", "^", "~"]);
   let index = 0;
 
   while (index < source.length) {
@@ -1629,10 +1644,34 @@ function tokenizeBraceLanguage(source) {
       index += 1;
       if ((char === "=" || char === "!" || char === "<" || char === ">") && source[index] === "=") {
         index += 1;
+        if (char === "=" && source[index] === "=") {
+          index += 1;
+        }
+        if (char === "!" && source[index] === "=") {
+          index += 1;
+        }
       } else if ((char === "+" || char === "-" || char === "&" || char === "|") && source[index] === char) {
+        index += 1;
+      } else if ((char === "+" || char === "-" || char === "*" || char === "/" || char === "%" || char === "&" || char === "|" || char === "^") && source[index] === "=") {
         index += 1;
       } else if (char === "=" && source[index] === ">") {
         index += 1;
+      } else if (char === "-" && source[index] === ">") {
+        index += 1;
+      } else if ((char === "<" || char === ">") && source[index] === char) {
+        index += 1;
+        if (source[index] === "=") {
+          index += 1;
+        }
+      } else if (char === ":" && source[index] === ":") {
+        index += 1;
+      } else if (char === "?" && source[index] === ".") {
+        index += 1;
+      } else if (char === "?" && source[index] === "?") {
+        index += 1;
+        if (source[index] === "=") {
+          index += 1;
+        }
       }
       tokens.push({ type: "symbol", start, end: index, value: source.slice(start, index) });
       continue;
