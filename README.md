@@ -1,10 +1,10 @@
 # AutologInsert Node
 
-AST-based Node.js CLI for inserting Autolog markers into source code.
+ソースコードに Autolog マーカーを挿入するための、AST ベースの Node.js CLI です。
 
-This tool reads source code, detects functions and control-flow blocks, and inserts markers such as `//$$START_FUNC$$`, `//$$END_IF$$`, and `//$$RETURN_FUNC$$`.
+このツールはソースコードを読み取り、関数や制御フローブロックを検出して、`//$$START_FUNC$$`、`//$$END_IF$$`、`//$$RETURN_FUNC$$` のようなマーカーを挿入します。
 
-## Supported languages
+## 対応言語
 
 - C
 - C++
@@ -13,75 +13,75 @@ This tool reads source code, detects functions and control-flow blocks, and inse
 - JavaScript
 - PHP
 
-## Requirements
+## 動作要件
 
 - Node.js `>= 24`
 
-## Install
+## インストール
 
 ```bash
 npm install
 ```
 
-## Usage
+## 使い方
 
 ```bash
 node ./src/cli.js [options] [source-file]
 ```
 
-Options:
+オプション:
 
-- `-i <file>`: input file. Defaults to stdin.
-- `-o <file>`: output file. Defaults to stdout.
-- `-c`: treat input as C.
-- `-cpp`: treat input as C++.
-- `-csharp` or `-cs`: treat input as C#.
-- `-java`: treat input as Java.
-- `-javascript` or `-js`: treat input as JavaScript.
-- `-php`: treat input as PHP.
-- `-VC`: alias of `-c`.
-- `-h`, `-help`, `--help`: show help.
+- `-i <file>`: 入力ファイルを指定します。省略時は標準入力です。
+- `-o <file>`: 出力ファイルを指定します。省略時は標準出力です。
+- `-c`: 入力を C として扱います。
+- `-cpp`: 入力を C++ として扱います。
+- `-csharp` または `-cs`: 入力を C# として扱います。
+- `-java`: 入力を Java として扱います。
+- `-javascript` または `-js`: 入力を JavaScript として扱います。
+- `-php`: 入力を PHP として扱います。
+- `-VC`: `-c` の別名です。
+- `-h`, `-help`, `--help`: ヘルプを表示します。
 
-If no language flag is given, the CLI tries to detect the language from the file extension.
+言語指定のフラグを省略した場合は、CLI がファイル拡張子から言語を判定します。
 
-## Examples
+## 使用例
 
-Instrument a JavaScript file and write the result to stdout:
+JavaScript ファイルを変換して標準出力へ出力する例:
 
 ```bash
 node ./src/cli.js -javascript ./example.js
 ```
 
-Instrument a PHP file and save the output:
+PHP ファイルを変換して保存する例:
 
 ```bash
 node ./src/cli.js -php -i ./input.php -o ./output.php
 ```
 
-Pipe input through stdin:
+標準入力から受け取る例:
 
 ```bash
 Get-Content .\input.java | node .\src\cli.js -java > output.java
 ```
 
-## Verification
+## 動作確認
 
-You can verify the behavior of Autolog on the following site:
+以下のサイトで Autolog の動作を確認できます。
 
 - https://www.mics-soft.jp/autolog/
 
-## Notes
+## 注意事項
 
-- C input currently uses the C++ tree-sitter grammar as a fallback.
-- C# currently uses a token-based fallback path instead of tree-sitter.
-- The tool writes warnings to stderr when a fallback path is used.
-- `package.json` is marked `"private": true`, so this repository is intended for GitHub publication, not direct npm publication in its current form.
+- C の入力は現在、フォールバックとして C++ の tree-sitter grammar を使用します。
+- C# は現在、tree-sitter ではなくトークンベースのフォールバック処理を使用します。
+- フォールバック処理が使われた場合、警告は標準エラー出力へ出力されます。
+- `package.json` には `"private": true` が設定されているため、現状は npm 公開ではなく GitHub 公開を前提としています。
 
-## Repository contents
+## リポジトリ構成
 
-- [src/cli.js](./src/cli.js): command line entry point
-- [src/instrument.js](./src/instrument.js): language detection and instrumentation logic
+- [src/cli.js](./src/cli.js): コマンドラインのエントリーポイント
+- [src/instrument.js](./src/instrument.js): 言語判定とマーカー挿入の実装
 
-## License
+## ライセンス
 
-MIT. See [LICENSE](./LICENSE).
+MIT ライセンスです。詳細は [LICENSE](./LICENSE) を参照してください。
