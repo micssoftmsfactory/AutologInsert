@@ -64,6 +64,12 @@ Pipe input through stdin:
 Get-Content .\input.java | node .\src\cli.js -java > output.java
 ```
 
+## Verification
+
+You can verify the behavior of Autolog on the following site:
+
+- https://www.mics-soft.jp/autolog/
+
 ## Notes
 
 - C input currently uses the C++ tree-sitter grammar as a fallback.
