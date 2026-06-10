@@ -1,10 +1,13 @@
 "use strict";
 
+const path = require("node:path");
 const Parser = require("tree-sitter");
 const cppLanguage = require("tree-sitter-cpp");
 const javaLanguage = require("tree-sitter-java");
 const javascriptLanguage = require("tree-sitter-javascript");
 const phpParser = require("php-parser");
+
+const TREE_SITTER_SOURCE_LENGTH_LIMIT = 32767;
 
 const SUPPORTED_LANGUAGES = ["c", "cpp", "csharp", "java", "javascript", "php"];
 
@@ -107,26 +110,65 @@ function detectLanguage({ explicitFlag, inputPath }) {
 }
 
 function instrumentSource(source, language, context = {}) {
+  const instrumentContext = createInstrumentContext(context);
+
   switch (language) {
     case "javascript":
+      if (source.length > TREE_SITTER_SOURCE_LENGTH_LIMIT) {
+        return instrumentLargeJavascriptSource(source, instrumentContext);
+      }
+      return instrumentTreeSitterSource(source, language, instrumentContext);
     case "java":
     case "cpp":
     case "c":
-      return instrumentTreeSitterSource(source, language);
+      return instrumentTreeSitterSource(source, language, instrumentContext);
     case "php":
-      return instrumentPhpSource(source);
+      return instrumentPhpSource(source, instrumentContext);
     case "csharp":
-      return instrumentBraceLanguageSource(source, "csharp");
+      return instrumentBraceLanguageSource(source, "csharp", instrumentContext);
     default:
       throw new Error(`Unsupported language: ${language}`);
   }
 }
 
-function instrumentTreeSitterSource(source, language) {
+function createInstrumentContext(context) {
+  const filePath =
+    context && typeof context.filePath === "string" && context.filePath.length > 0
+      ? context.filePath
+      : null;
+
+  return {
+    filePath,
+    fileLabel: filePath ? path.basename(filePath) : "<stdin>",
+  };
+}
+
+function instrumentLargeJavascriptSource(source, context) {
+  return instrumentBraceLanguageSource(source, "javascript", context, {
+    warningMessage:
+      `JavaScript input exceeded the tree-sitter limit of ${TREE_SITTER_SOURCE_LENGTH_LIMIT} characters, so a token-based fallback was used.`,
+  });
+}
+
+function instrumentTreeSitterSource(source, language, context) {
   const parser = new Parser();
   parser.setLanguage(getTreeSitterGrammar(language));
 
-  const tree = parser.parse(source);
+  let tree;
+  try {
+    tree = parser.parse(source);
+  } catch (error) {
+    if (
+      error &&
+      error.message === "Invalid argument" &&
+      source.length > TREE_SITTER_SOURCE_LENGTH_LIMIT
+    ) {
+      throw new Error(
+        `The ${language} tree-sitter parser in this Node.js runtime cannot parse inputs longer than ${TREE_SITTER_SOURCE_LENGTH_LIMIT} characters. Received ${source.length} characters for ${context.fileLabel}. Split the file or use a smaller input.`
+      );
+    }
+    throw error;
+  }
   const layout = createLayout(source);
   const insertions = [];
   const seen = new Set();
@@ -142,7 +184,13 @@ function instrumentTreeSitterSource(source, language) {
           seen,
           body,
           "FUNC",
-          getTreeSitterFunctionMetadata(source, language, node)
+          createMarkerMetadata(
+            layout,
+            context,
+            node.startIndex,
+            getTreeSitterFunctionName(source, language, node),
+            getTreeSitterFunctionMetadata(source, language, node)
+          )
         );
       }
     }
@@ -154,7 +202,13 @@ function instrumentTreeSitterSource(source, language) {
         insertions,
         seen,
         node.startIndex,
-        getTreeSitterReturnMetadata(source, node)
+        createMarkerMetadata(
+          layout,
+          context,
+          node.startIndex,
+          getEnclosingTreeSitterFunctionName(source, language, node),
+          getTreeSitterReturnMetadata(source, node)
+        )
       );
       return;
     }
@@ -162,6 +216,7 @@ function instrumentTreeSitterSource(source, language) {
     if (node.type === "if_statement") {
       const consequence = node.childForFieldName("consequence");
       const alternative = node.childForFieldName("alternative");
+      const functionName = getEnclosingTreeSitterFunctionName(source, language, node);
 
       if (isBlockNode(consequence, language)) {
         addBlockMarkers(
@@ -171,13 +226,27 @@ function instrumentTreeSitterSource(source, language) {
           seen,
           consequence,
           "IF",
-          getTreeSitterConditionMetadata(source, node)
+          createMarkerMetadata(
+            layout,
+            context,
+            node.startIndex,
+            functionName,
+            getTreeSitterConditionMetadata(source, node)
+          )
         );
       }
 
       const elseBlock = getElseBlockNode(alternative, language);
       if (elseBlock) {
-        addBlockMarkers(source, layout, insertions, seen, elseBlock, "ELSE");
+        addBlockMarkers(
+          source,
+          layout,
+          insertions,
+          seen,
+          elseBlock,
+          "ELSE",
+          createMarkerMetadata(layout, context, alternative.startIndex, functionName, null)
+        );
       }
       return;
     }
@@ -192,7 +261,13 @@ function instrumentTreeSitterSource(source, language) {
           seen,
           body,
           "CATCH",
-          getTreeSitterCatchMetadata(source, node)
+          createMarkerMetadata(
+            layout,
+            context,
+            node.startIndex,
+            getEnclosingTreeSitterFunctionName(source, language, node),
+            getTreeSitterCatchMetadata(source, node)
+          )
         );
       }
       return;
@@ -201,7 +276,21 @@ function instrumentTreeSitterSource(source, language) {
     if (node.type === "finally_clause") {
       const body = node.childForFieldName("body") || node.namedChild(0);
       if (isBlockNode(body, language)) {
-        addBlockMarkers(source, layout, insertions, seen, body, "FINALLY");
+        addBlockMarkers(
+          source,
+          layout,
+          insertions,
+          seen,
+          body,
+          "FINALLY",
+          createMarkerMetadata(
+            layout,
+            context,
+            node.startIndex,
+            getEnclosingTreeSitterFunctionName(source, language, node),
+            null
+          )
+        );
       }
       return;
     }
@@ -215,13 +304,34 @@ function instrumentTreeSitterSource(source, language) {
         node.startIndex,
         node.endIndex,
         "CASE",
-        getTreeSitterCaseMetadata(source, node)
+        createMarkerMetadata(
+          layout,
+          context,
+          node.startIndex,
+          getEnclosingTreeSitterFunctionName(source, language, node),
+          getTreeSitterCaseMetadata(source, node)
+        )
       );
       return;
     }
 
     if (language === "javascript" && node.type === "switch_default") {
-      addRangeMarkers(source, layout, insertions, seen, node.startIndex, node.endIndex, "DEFAULT");
+      addRangeMarkers(
+        source,
+        layout,
+        insertions,
+        seen,
+        node.startIndex,
+        node.endIndex,
+        "DEFAULT",
+        createMarkerMetadata(
+          layout,
+          context,
+          node.startIndex,
+          getEnclosingTreeSitterFunctionName(source, language, node),
+          null
+        )
+      );
       return;
     }
 
@@ -236,7 +346,13 @@ function instrumentTreeSitterSource(source, language) {
         node.startIndex,
         node.endIndex,
         markerName,
-        markerName === "CASE" ? getTreeSitterCaseMetadata(source, label) : null
+        createMarkerMetadata(
+          layout,
+          context,
+          node.startIndex,
+          getEnclosingTreeSitterFunctionName(source, language, node),
+          markerName === "CASE" ? getTreeSitterCaseMetadata(source, label) : null
+        )
       );
       return;
     }
@@ -251,7 +367,13 @@ function instrumentTreeSitterSource(source, language) {
         node.startIndex,
         node.endIndex,
         markerName,
-        markerName === "CASE" ? getTreeSitterCaseMetadata(source, node) : null
+        createMarkerMetadata(
+          layout,
+          context,
+          node.startIndex,
+          getEnclosingTreeSitterFunctionName(source, language, node),
+          markerName === "CASE" ? getTreeSitterCaseMetadata(source, node) : null
+        )
       );
       return;
     }
@@ -270,7 +392,13 @@ function instrumentTreeSitterSource(source, language) {
         seen,
         body,
         loopMarker,
-        getTreeSitterConditionMetadata(source, node)
+        createMarkerMetadata(
+          layout,
+          context,
+          node.startIndex,
+          getEnclosingTreeSitterFunctionName(source, language, node),
+          getTreeSitterConditionMetadata(source, node)
+        )
       );
     }
   });
@@ -285,7 +413,7 @@ function instrumentTreeSitterSource(source, language) {
   };
 }
 
-function instrumentPhpSource(source) {
+function instrumentPhpSource(source, context) {
   const engine = new phpParser.Engine({
     parser: {
       php7: true,
@@ -302,7 +430,7 @@ function instrumentPhpSource(source) {
   const insertions = [];
   const seen = new Set();
 
-  walkPhpAst(ast, (node) => {
+  walkPhpAst(ast, (node, ancestors) => {
     if (!node || !node.kind) {
       return;
     }
@@ -315,7 +443,13 @@ function instrumentPhpSource(source) {
         seen,
         node.body.loc,
         "FUNC",
-        getPhpFunctionMetadata(source, node)
+        createMarkerMetadata(
+          layout,
+          context,
+          node.loc?.start?.offset ?? node.body.loc.start.offset,
+          getPhpFunctionName(node),
+          getPhpFunctionMetadata(source, node)
+        )
       );
       return;
     }
@@ -327,7 +461,13 @@ function instrumentPhpSource(source) {
         insertions,
         seen,
         node.loc.start.offset,
-        getPhpReturnMetadata(source, node)
+        createMarkerMetadata(
+          layout,
+          context,
+          node.loc.start.offset,
+          getEnclosingPhpFunctionName(ancestors),
+          getPhpReturnMetadata(source, node)
+        )
       );
       return;
     }
@@ -341,11 +481,31 @@ function instrumentPhpSource(source) {
           seen,
           node.body.loc,
           "IF",
-          getPhpConditionMetadata(source, node)
+          createMarkerMetadata(
+            layout,
+            context,
+            node.loc?.start?.offset ?? node.body.loc.start.offset,
+            getEnclosingPhpFunctionName(ancestors),
+            getPhpConditionMetadata(source, node)
+          )
         );
       }
       if (isPhpBlock(node.alternate)) {
-        addBlockMarkers(source, layout, insertions, seen, node.alternate.loc, "ELSE");
+        addBlockMarkers(
+          source,
+          layout,
+          insertions,
+          seen,
+          node.alternate.loc,
+          "ELSE",
+          createMarkerMetadata(
+            layout,
+            context,
+            node.alternate.loc.start.offset,
+            getEnclosingPhpFunctionName(ancestors),
+            null
+          )
+        );
       }
       return;
     }
@@ -358,7 +518,13 @@ function instrumentPhpSource(source) {
         seen,
         node.body.loc,
         "CATCH",
-        getPhpCatchMetadata(source, node)
+        createMarkerMetadata(
+          layout,
+          context,
+          node.loc?.start?.offset ?? node.body.loc.start.offset,
+          getEnclosingPhpFunctionName(ancestors),
+          getPhpCatchMetadata(source, node)
+        )
       );
       return;
     }
@@ -373,7 +539,13 @@ function instrumentPhpSource(source) {
             seen,
             node.body.loc,
             "WHILE",
-            getPhpConditionMetadata(source, node)
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc?.start?.offset ?? node.body.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              getPhpConditionMetadata(source, node)
+            )
           );
         }
         break;
@@ -386,7 +558,13 @@ function instrumentPhpSource(source) {
             seen,
             node.body.loc,
             "FOR",
-            getPhpConditionMetadata(source, node)
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc?.start?.offset ?? node.body.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              getPhpConditionMetadata(source, node)
+            )
           );
         }
         break;
@@ -399,7 +577,13 @@ function instrumentPhpSource(source) {
             seen,
             node.body.loc,
             "FOREACH",
-            getPhpConditionMetadata(source, node)
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc?.start?.offset ?? node.body.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              getPhpConditionMetadata(source, node)
+            )
           );
         }
         break;
@@ -412,7 +596,13 @@ function instrumentPhpSource(source) {
             seen,
             node.body.loc,
             "DO",
-            getPhpConditionMetadata(source, node)
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc?.start?.offset ?? node.body.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              getPhpConditionMetadata(source, node)
+            )
           );
         }
         break;
@@ -425,13 +615,33 @@ function instrumentPhpSource(source) {
             seen,
             node.body.loc,
             "SWITCH",
-            getPhpConditionMetadata(source, node)
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc?.start?.offset ?? node.body.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              getPhpConditionMetadata(source, node)
+            )
           );
         }
         break;
       case "try":
         if (isPhpBlock(node.body)) {
-          addBlockMarkers(source, layout, insertions, seen, node.body.loc, "TRY");
+          addBlockMarkers(
+            source,
+            layout,
+            insertions,
+            seen,
+            node.body.loc,
+            "TRY",
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc?.start?.offset ?? node.body.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              null
+            )
+          );
         }
         if (Array.isArray(node.catches)) {
           for (const catchNode of node.catches) {
@@ -443,13 +653,33 @@ function instrumentPhpSource(source) {
                 seen,
                 catchNode.body.loc,
                 "CATCH",
-                getPhpCatchMetadata(source, catchNode)
+                createMarkerMetadata(
+                  layout,
+                  context,
+                  catchNode.loc?.start?.offset ?? catchNode.body.loc.start.offset,
+                  getEnclosingPhpFunctionName(ancestors),
+                  getPhpCatchMetadata(source, catchNode)
+                )
               );
             }
           }
         }
         if (isPhpBlock(node.always)) {
-          addBlockMarkers(source, layout, insertions, seen, node.always.loc, "FINALLY");
+          addBlockMarkers(
+            source,
+            layout,
+            insertions,
+            seen,
+            node.always.loc,
+            "FINALLY",
+            createMarkerMetadata(
+              layout,
+              context,
+              node.always.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              null
+            )
+          );
         }
         break;
       case "case":
@@ -461,7 +691,13 @@ function instrumentPhpSource(source) {
             seen,
             node.loc,
             node.test ? "CASE" : "DEFAULT",
-            node.test ? getPhpCaseMetadata(source, node) : null
+            createMarkerMetadata(
+              layout,
+              context,
+              node.loc.start.offset,
+              getEnclosingPhpFunctionName(ancestors),
+              node.test ? getPhpCaseMetadata(source, node) : null
+            )
           );
         }
         break;
@@ -476,7 +712,7 @@ function instrumentPhpSource(source) {
   };
 }
 
-function instrumentBraceLanguageSource(source, language) {
+function instrumentBraceLanguageSource(source, language, context, options = {}) {
   const layout = createLayout(source);
   const tokens = tokenizeBraceLanguage(source);
   const insertions = [];
@@ -494,7 +730,13 @@ function instrumentBraceLanguageSource(source, language) {
         insertions,
         seen,
         token.start,
-        buildBraceReturnMetadata(tokens, index)
+        createMarkerMetadata(
+          layout,
+          context,
+          token.start,
+          getCurrentBraceFunctionName(blockStack),
+          buildBraceReturnMetadata(tokens, index)
+        )
       );
       continue;
     }
@@ -515,7 +757,13 @@ function instrumentBraceLanguageSource(source, language) {
 
       openLabeledBranch = {
         kind: token.value === "case" ? "CASE" : "DEFAULT",
-        metadata: token.value === "case" ? buildBraceCaseMetadata(tokens, index) : null,
+        metadata: createMarkerMetadata(
+          layout,
+          context,
+          token.start,
+          getCurrentBraceFunctionName(blockStack),
+          token.value === "case" ? buildBraceCaseMetadata(tokens, index) : null
+        ),
         start: token.start,
         switchDepth: getSwitchDepth(blockStack),
       };
@@ -523,9 +771,16 @@ function instrumentBraceLanguageSource(source, language) {
     }
 
     if (token.type === "symbol" && token.value === "{") {
-      const block = classifyBraceBlock(tokens, index);
+      const block = classifyBraceBlock(tokens, index, getCurrentBraceFunctionName(blockStack), language);
       blockStack.push(block);
       if (block && block.kind) {
+        block.markerMetadata = createMarkerMetadata(
+          layout,
+          context,
+          block.originOffset ?? token.start,
+          block.functionName,
+          block.metadata
+        );
         addBraceBlockMarkers(
           source,
           layout,
@@ -534,7 +789,7 @@ function instrumentBraceLanguageSource(source, language) {
           token,
           block.kind,
           true,
-          block.metadata
+          block.markerMetadata
         );
       }
       continue;
@@ -559,7 +814,7 @@ function instrumentBraceLanguageSource(source, language) {
 
       const block = blockStack.pop() || null;
       if (block && block.kind) {
-        addBraceBlockMarkers(source, layout, insertions, seen, token, block.kind, false);
+        addBraceBlockMarkers(source, layout, insertions, seen, token, block.kind, false, block.markerMetadata);
       }
     }
   }
@@ -567,7 +822,8 @@ function instrumentBraceLanguageSource(source, language) {
   return {
     code: applyInsertions(source, insertions),
     warnings: [
-      `The ${language} path uses a token-based fallback because a compatible tree-sitter grammar binding is not available for this Node.js runtime.`,
+      options.warningMessage ||
+        `The ${language} path uses a token-based fallback because a compatible tree-sitter grammar binding is not available for this Node.js runtime.`,
     ],
   };
 }
@@ -594,22 +850,23 @@ function walkTree(node, visit) {
   }
 }
 
-function walkPhpAst(node, visit) {
+function walkPhpAst(node, visit, ancestors = []) {
   if (!node || typeof node !== "object") {
     return;
   }
 
-  visit(node);
+  visit(node, ancestors);
+  const nextAncestors = [...ancestors, node];
 
   for (const value of Object.values(node)) {
     if (Array.isArray(value)) {
       for (const item of value) {
-        walkPhpAst(item, visit);
+        walkPhpAst(item, visit, nextAncestors);
       }
       continue;
     }
 
-    walkPhpAst(value, visit);
+    walkPhpAst(value, visit, nextAncestors);
   }
 }
 
@@ -693,6 +950,10 @@ function createLayout(source) {
     return lineStarts[getLineIndex(offset)];
   }
 
+  function getLineNumber(offset) {
+    return getLineIndex(offset) + 1;
+  }
+
   function getLineIndent(offset) {
     const start = getLineStart(offset);
     let cursor = start;
@@ -707,6 +968,7 @@ function createLayout(source) {
   return {
     newline,
     indentUnit,
+    getLineNumber,
     getLineStart,
     getLineIndent,
   };
@@ -744,12 +1006,12 @@ function addBlockMarkers(source, layout, insertions, seen, blockNodeOrLoc, marke
   const closingPrefix = source.slice(closingLineStart, range.closeBraceStart);
   const startMarker = buildStartMarker(markerName, metadata);
   const startText = isSingleLineBlock
-    ? `${layout.newline}${innerIndent}${startMarker}${layout.newline}${innerIndent}`
-    : `${layout.newline}${innerIndent}${startMarker}`;
+    ? `${layout.newline}${startMarker}${layout.newline}${innerIndent}`
+    : `${layout.newline}${startMarker}`;
   const endAtLineStart = closingPrefix.trim().length === 0;
   const endText = isSingleLineBlock || !endAtLineStart
-    ? `${layout.newline}${innerIndent}${buildEndMarker(markerName)}${layout.newline}${closingIndent}`
-    : `${closingIndent}${buildEndMarker(markerName)}${layout.newline}`;
+    ? `${layout.newline}${buildEndMarker(markerName, metadata)}${layout.newline}${closingIndent}`
+    : `${buildEndMarker(markerName, metadata)}${layout.newline}`;
 
   pushInsertion(insertions, seen, range.openBraceEnd, startText);
   pushInsertion(insertions, seen, endAtLineStart ? closingLineStart : range.closeBraceStart, endText);
@@ -765,26 +1027,24 @@ function addBraceBlockMarkers(source, layout, insertions, seen, token, markerNam
   const closingPrefix = source.slice(closingLineStart, token.start);
   const text = isStart
     ? immediateContent
-      ? `${layout.newline}${innerIndent}${buildStartMarker(markerName, metadata)}${layout.newline}${innerIndent}`
-      : `${layout.newline}${innerIndent}${buildStartMarker(markerName, metadata)}`
+      ? `${layout.newline}${buildStartMarker(markerName, metadata)}${layout.newline}${innerIndent}`
+      : `${layout.newline}${buildStartMarker(markerName, metadata)}`
     : closingPrefix.trim().length === 0
-      ? `${closingIndent}${buildEndMarker(markerName)}${layout.newline}`
-      : `${layout.newline}${innerIndent}${buildEndMarker(markerName)}${layout.newline}${closingIndent}`;
+      ? `${buildEndMarker(markerName, metadata)}${layout.newline}`
+      : `${layout.newline}${buildEndMarker(markerName, metadata)}${layout.newline}${closingIndent}`;
   const index = isStart ? token.end : closingPrefix.trim().length === 0 ? closingLineStart : token.start;
   pushInsertion(insertions, seen, index, text);
 }
 
 function addRangeMarkers(source, layout, insertions, seen, startIndex, endIndex, markerName, metadata = null) {
   const lineStart = layout.getLineStart(startIndex);
-  const indent = layout.getLineIndent(startIndex);
-  const startText = `${indent}${buildStartMarker(markerName, metadata)}${layout.newline}`;
+  const startText = `${buildStartMarker(markerName, metadata)}${layout.newline}`;
 
   const endLineStart = layout.getLineStart(endIndex);
-  const endIndent = layout.getLineIndent(endIndex);
   const endPrefix = source.slice(endLineStart, endIndex);
   const endText = endPrefix.trim().length === 0
-    ? `${endIndent}${buildEndMarker(markerName)}${layout.newline}`
-    : `${layout.newline}${endIndent}${buildEndMarker(markerName)}${layout.newline}`;
+    ? `${buildEndMarker(markerName, metadata)}${layout.newline}`
+    : `${layout.newline}${buildEndMarker(markerName, metadata)}${layout.newline}`;
 
   pushInsertion(insertions, seen, lineStart, startText);
   pushInsertion(insertions, seen, endPrefix.trim().length === 0 ? endLineStart : endIndex, endText);
@@ -803,13 +1063,13 @@ function addReturnMarker(source, layout, insertions, seen, returnStart, metadata
   const marker = buildReturnMarker(metadata);
   const prefix = source.slice(lineStart, returnStart);
   if (prefix.trim().length === 0) {
-    const text = `${indent}${marker}${layout.newline}`;
+    const text = `${marker}${layout.newline}`;
     pushInsertion(insertions, seen, lineStart, text);
     return;
   }
 
   const inlineIndent = `${indent}${layout.indentUnit}`;
-  const text = `${layout.newline}${inlineIndent}${marker}${layout.newline}${inlineIndent}`;
+  const text = `${layout.newline}${marker}${layout.newline}${inlineIndent}`;
   pushInsertion(insertions, seen, returnStart, text);
 }
 
@@ -861,8 +1121,11 @@ function buildStartMarker(markerName, metadata) {
   return `//$$START_${markerName}|${metadata}$$`;
 }
 
-function buildEndMarker(markerName) {
-  return `//$$END_${markerName}$$`;
+function buildEndMarker(markerName, metadata) {
+  if (!metadata) {
+    return `//$$END_${markerName}$$`;
+  }
+  return `//$$END_${markerName}|${metadata}$$`;
 }
 
 function buildReturnMarker(metadata) {
@@ -870,6 +1133,167 @@ function buildReturnMarker(metadata) {
     return "//$$RETURN_FUNC$$";
   }
   return `//$$RETURN_FUNC|${metadata}$$`;
+}
+
+function createMarkerMetadata(layout, context, offset, functionName, metadata = null) {
+  const fields = [
+    ["file", context.fileLabel],
+    ["line", layout.getLineNumber(offset)],
+    ["func", functionName || "<global>"],
+  ];
+
+  for (const [key, value] of Object.entries(parseLegacyMetadata(metadata))) {
+    fields.push([key, value]);
+  }
+
+  return fields
+    .filter(([, value]) => value !== null && value !== undefined && String(value).length > 0)
+    .map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`)
+    .join("|");
+}
+
+function parseLegacyMetadata(metadata) {
+  if (!metadata) {
+    return {};
+  }
+
+  if (metadata.startsWith("args: ")) {
+    return { args: metadata.slice("args: ".length) };
+  }
+
+  if (metadata.startsWith("expr: ")) {
+    return { expr: metadata.slice("expr: ".length) };
+  }
+
+  return { detail: metadata };
+}
+
+function getTreeSitterFunctionName(source, language, node) {
+  switch (language) {
+    case "javascript":
+      return getJavascriptFunctionName(source, node);
+    case "java":
+      return getJavaFunctionName(source, node);
+    case "cpp":
+    case "c":
+      return getCppFunctionName(source, node);
+    default:
+      return "<anonymous>";
+  }
+}
+
+function getEnclosingTreeSitterFunctionName(source, language, node) {
+  let current = node;
+
+  while (current) {
+    if (FUNCTION_NODE_TYPES[language] && FUNCTION_NODE_TYPES[language].has(current.type)) {
+      return getTreeSitterFunctionName(source, language, current);
+    }
+    current = current.parent;
+  }
+
+  return "<global>";
+}
+
+function getJavascriptFunctionName(source, node) {
+  const directName = normalizeInlineText(getNodeText(source, node.childForFieldName("name")));
+  if (directName) {
+    return directName;
+  }
+
+  const parent = node.parent;
+  if (!parent) {
+    return "<anonymous>";
+  }
+
+  if (parent.type === "variable_declarator") {
+    const variableName = normalizeInlineText(getNodeText(source, parent.childForFieldName("name")));
+    return variableName || "<anonymous>";
+  }
+
+  if (parent.type === "assignment_expression") {
+    const leftText = normalizeInlineText(getNodeText(source, parent.childForFieldName("left") || parent.namedChild(0)));
+    return extractTrailingIdentifier(leftText) || "<anonymous>";
+  }
+
+  if (parent.type === "pair" || parent.type === "property_definition" || parent.type === "public_field_definition") {
+    const keyText = normalizeInlineText(
+      getNodeText(source, parent.childForFieldName("key") || parent.childForFieldName("name") || parent.namedChild(0))
+    );
+    return extractTrailingIdentifier(keyText) || keyText || "<anonymous>";
+  }
+
+  return "<anonymous>";
+}
+
+function getJavaFunctionName(source, node) {
+  const directName = normalizeInlineText(getNodeText(source, node.childForFieldName("name")));
+  if (directName) {
+    return directName;
+  }
+
+  if (node.type === "compact_constructor_declaration") {
+    let current = node.parent;
+    while (current) {
+      const className = normalizeInlineText(getNodeText(source, current.childForFieldName("name")));
+      if (className) {
+        return className;
+      }
+      current = current.parent;
+    }
+  }
+
+  return "<anonymous>";
+}
+
+function getCppFunctionName(source, node) {
+  const declaratorText = getNodeText(source, node.childForFieldName("declarator"));
+  const beforeParen = declaratorText.split("(")[0] || "";
+  const match = beforeParen.match(/([~A-Za-z_][A-Za-z0-9_:~]*)\s*$/);
+  return match ? match[1] : "<anonymous>";
+}
+
+function getPhpFunctionName(node) {
+  if (!node) {
+    return "<anonymous>";
+  }
+
+  if (typeof node.name === "string" && node.name.length > 0) {
+    return node.name;
+  }
+
+  if (node.name && typeof node.name.name === "string" && node.name.name.length > 0) {
+    return node.name.name;
+  }
+
+  return "<anonymous>";
+}
+
+function getEnclosingPhpFunctionName(ancestors) {
+  for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+    const ancestor = ancestors[index];
+    if (ancestor && (ancestor.kind === "function" || ancestor.kind === "method")) {
+      return getPhpFunctionName(ancestor);
+    }
+  }
+
+  return "<global>";
+}
+
+function getCurrentBraceFunctionName(blockStack) {
+  for (let index = blockStack.length - 1; index >= 0; index -= 1) {
+    const block = blockStack[index];
+    if (block && block.kind === "FUNC" && block.functionName) {
+      return block.functionName;
+    }
+  }
+
+  return "<global>";
+}
+
+function extractTrailingIdentifier(text) {
+  const match = String(text || "").match(/([A-Za-z_$][A-Za-z0-9_$]*)$/);
+  return match ? match[1] : "";
 }
 
 function getTreeSitterFunctionMetadata(source, language, node) {
@@ -1114,6 +1538,48 @@ function tokenizeBraceLanguage(source) {
       continue;
     }
 
+    if (char === "/" && shouldTreatAsRegexLiteral(tokens)) {
+      const start = index;
+      index += 1;
+      let escaped = false;
+      let inCharClass = false;
+
+      while (index < source.length) {
+        const current = source[index];
+        if (escaped) {
+          escaped = false;
+          index += 1;
+          continue;
+        }
+        if (current === "\\") {
+          escaped = true;
+          index += 1;
+          continue;
+        }
+        if (current === "[" && !inCharClass) {
+          inCharClass = true;
+          index += 1;
+          continue;
+        }
+        if (current === "]" && inCharClass) {
+          inCharClass = false;
+          index += 1;
+          continue;
+        }
+        if (current === "/" && !inCharClass) {
+          index += 1;
+          while (index < source.length && /[A-Za-z]/.test(source[index])) {
+            index += 1;
+          }
+          break;
+        }
+        index += 1;
+      }
+
+      tokens.push({ type: "regex", start, end: index, value: source.slice(start, index) });
+      continue;
+    }
+
     if (char === "\"" || char === "'" || char === "`") {
       const quote = char;
       const start = index;
@@ -1178,14 +1644,69 @@ function tokenizeBraceLanguage(source) {
   return tokens;
 }
 
-function classifyBraceBlock(tokens, braceIndex) {
+function shouldTreatAsRegexLiteral(tokens) {
+  const previous = tokens[tokens.length - 1] || null;
+  if (!previous) {
+    return true;
+  }
+
+  if (previous.type === "word") {
+    return new Set([
+      "return",
+      "case",
+      "throw",
+      "typeof",
+      "instanceof",
+      "delete",
+      "void",
+      "new",
+      "in",
+      "of",
+      "yield",
+      "await",
+    ]).has(previous.value);
+  }
+
+  if (previous.type !== "symbol") {
+    return false;
+  }
+
+  return new Set([
+    "(",
+    "{",
+    "[",
+    ",",
+    ":",
+    ";",
+    "=",
+    "=>",
+    "!",
+    "?",
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "&",
+    "|",
+    "<",
+    ">",
+  ]).has(previous.value);
+}
+
+function classifyBraceBlock(tokens, braceIndex, currentFunctionName, language) {
   const previous = tokens[braceIndex - 1] || null;
   if (!previous) {
     return null;
   }
 
   if (previous.type === "word" && CONTROL_KEYWORDS.has(previous.value)) {
-    return { kind: CONTROL_KEYWORDS.get(previous.value), metadata: null };
+    return {
+      kind: CONTROL_KEYWORDS.get(previous.value),
+      metadata: null,
+      functionName: currentFunctionName,
+      originOffset: previous.start,
+    };
   }
 
   if (previous.type === "symbol" && previous.value === ")") {
@@ -1201,6 +1722,8 @@ function classifyBraceBlock(tokens, braceIndex) {
         return {
           kind: control,
           metadata: buildBraceConditionMetadata(tokens, openParenIndex, braceIndex - 1),
+          functionName: currentFunctionName,
+          originOffset: beforeParen.start,
         };
       }
     }
@@ -1209,12 +1732,23 @@ function classifyBraceBlock(tokens, braceIndex) {
       return {
         kind: "FUNC",
         metadata: buildBraceFunctionMetadata(tokens, openParenIndex, braceIndex - 1),
+        functionName: buildBraceFunctionName(tokens, openParenIndex - 1),
+        originOffset: tokens[openParenIndex - 1].start,
       };
     }
   }
 
+  if (language === "javascript" && previous.type === "symbol" && previous.value === "=>") {
+    return classifyJavascriptArrowFunction(tokens, braceIndex, currentFunctionName);
+  }
+
   if (previous.type === "word" && (previous.value === "try" || previous.value === "do")) {
-    return { kind: CONTROL_KEYWORDS.get(previous.value), metadata: null };
+    return {
+      kind: CONTROL_KEYWORDS.get(previous.value),
+      metadata: null,
+      functionName: currentFunctionName,
+      originOffset: previous.start,
+    };
   }
 
   return null;
@@ -1290,6 +1824,78 @@ function getSwitchDepth(blockStack) {
 
 function isJavaDefaultLabel(node) {
   return Boolean(node && node.type === "switch_label" && node.namedChildCount === 0);
+}
+
+function buildBraceFunctionName(tokens, identifierIndex) {
+  const identifier = tokens[identifierIndex];
+  if (!identifier || identifier.type !== "word") {
+    return "<anonymous>";
+  }
+  return identifier.value === "function" ? "<anonymous>" : identifier.value;
+}
+
+function classifyJavascriptArrowFunction(tokens, braceIndex, currentFunctionName) {
+  const arrowIndex = braceIndex - 1;
+  const parameterToken = tokens[arrowIndex - 1] || null;
+  let functionName = findJavascriptAssignedFunctionName(tokens, arrowIndex);
+  let metadata = null;
+  let originOffset = parameterToken ? parameterToken.start : tokens[arrowIndex].start;
+
+  if (parameterToken && parameterToken.type === "symbol" && parameterToken.value === ")") {
+    const openParenIndex = findMatchingOpenToken(tokens, arrowIndex - 1, "(", ")");
+    if (openParenIndex !== -1) {
+      metadata = buildBraceFunctionMetadata(tokens, openParenIndex, arrowIndex - 1);
+      originOffset = tokens[openParenIndex].start;
+    }
+  } else if (parameterToken && parameterToken.type === "word") {
+    metadata = `args: ${parameterToken.value}`;
+    originOffset = parameterToken.start;
+  }
+
+  return {
+    kind: "FUNC",
+    metadata,
+    functionName: functionName || currentFunctionName || "<anonymous>",
+    originOffset,
+  };
+}
+
+function findJavascriptAssignedFunctionName(tokens, arrowIndex) {
+  for (let index = arrowIndex - 1; index >= 0; index -= 1) {
+    const token = tokens[index];
+
+    if (token.type === "symbol" && (token.value === "=" || token.value === ":")) {
+      return findPreviousWordToken(tokens, index - 1)?.value || "";
+    }
+
+    if (token.type === "symbol" && (token.value === ";" || token.value === "{" || token.value === "}" || token.value === ",")) {
+      break;
+    }
+  }
+
+  return "";
+}
+
+function findPreviousWordToken(tokens, startIndex) {
+  for (let index = startIndex; index >= 0; index -= 1) {
+    const token = tokens[index];
+    if (!token) {
+      continue;
+    }
+    if (token.type === "word") {
+      if (token.value === "async") {
+        continue;
+      }
+      return token;
+    }
+    if (token.type === "symbol" && token.value === ".") {
+      continue;
+    }
+    if (token.type === "symbol" && (token.value === "]" || token.value === ")")) {
+      break;
+    }
+  }
+  return null;
 }
 
 function buildBraceFunctionMetadata(tokens, openParenIndex, closeParenIndex) {

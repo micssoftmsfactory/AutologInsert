@@ -10,6 +10,7 @@ const {
   detectLanguage,
   instrumentSource,
 } = require("./instrument");
+const { transformSourceMarkers } = require("./markerToLog");
 
 function printHelp() {
   console.log(`AutologInsert Node.js (AST-based)
@@ -20,6 +21,8 @@ Usage:
 Options:
   -i <file>           Input file. Defaults to stdin.
   -o <file>           Output file. Defaults to stdout.
+  -markers-to-logs
+  -logs               Insert //$$...$$ markers, then transform them into mklog2seq-compatible log statements.
   -c                  Treat input as C.
   -cpp                Treat input as C++.
   -csharp | -cs       Treat input as C#.
@@ -39,6 +42,7 @@ function parseArgs(argv) {
     input: "stdin",
     output: "stdout",
     language: null,
+    mode: "instrument",
     passthrough: [],
   };
 
@@ -53,6 +57,10 @@ function parseArgs(argv) {
       case "-o":
         index += 1;
         options.output = argv[index] ?? "stdout";
+        break;
+      case "-markers-to-logs":
+      case "-logs":
+        options.mode = "markers-to-logs";
         break;
       case "-c":
       case "-cpp":
@@ -139,9 +147,20 @@ async function main() {
   }
 
   const source = await readInput(options.input);
-  const result = instrumentSource(source, resolvedLanguage, {
-    filePath: options.input === "stdin" ? null : path.resolve(options.input),
-  });
+  const result = options.mode === "markers-to-logs"
+    ? (() => {
+        const instrumented = instrumentSource(source, resolvedLanguage, {
+          filePath: options.input === "stdin" ? null : path.resolve(options.input),
+        });
+        const transformed = transformSourceMarkers(instrumented.code, resolvedLanguage);
+        return {
+          code: transformed.code,
+          warnings: [...instrumented.warnings, ...transformed.warnings],
+        };
+      })()
+    : instrumentSource(source, resolvedLanguage, {
+        filePath: options.input === "stdin" ? null : path.resolve(options.input),
+      });
 
   await writeOutput(options.output, result.code);
 
