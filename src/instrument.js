@@ -735,7 +735,7 @@ function instrumentBraceLanguageSource(source, language, context, options = {}) 
           context,
           token.start,
           getCurrentBraceFunctionName(blockStack),
-          buildBraceReturnMetadata(tokens, index)
+          buildBraceReturnMetadata(source, tokens, index)
         )
       );
       continue;
@@ -1934,11 +1934,12 @@ function buildBraceCaseMetadata(tokens, caseIndex) {
   return normalized ? `expr: ${normalized}` : null;
 }
 
-function buildBraceReturnMetadata(tokens, returnIndex) {
-  const collected = [];
+function buildBraceReturnMetadata(source, tokens, returnIndex) {
   let parenDepth = 0;
   let bracketDepth = 0;
   let braceDepth = 0;
+  let expressionStart = -1;
+  let expressionEnd = -1;
 
   for (let index = returnIndex + 1; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -1962,14 +1963,17 @@ function buildBraceReturnMetadata(tokens, returnIndex) {
       }
     }
 
-    collected.push(token.value);
+    if (expressionStart === -1) {
+      expressionStart = token.start;
+    }
+    expressionEnd = token.end;
   }
 
-  const normalized = normalizeInlineText(
-    collected.join(" ")
-      .replace(/\s+([,.;)\]}>])/g, "$1")
-      .replace(/([({\[<])\s+/g, "$1")
-  );
+  if (expressionStart === -1 || expressionEnd === -1) {
+    return null;
+  }
+
+  const normalized = normalizeExpressionText(source.slice(expressionStart, expressionEnd));
 
   return normalized ? `expr: ${normalized}` : null;
 }
