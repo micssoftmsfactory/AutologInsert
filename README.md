@@ -1,3 +1,9 @@
+## Related Project
+
+Visualize generated logs with mklog2seq:
+
+https://github.com/micssoftmsfactory/mklog2seq
+
 # AutologInsert Node
 
 ソースコードに Autolog マーカーを挿入するための、AST ベースの Node.js CLI です。
