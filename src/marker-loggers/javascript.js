@@ -203,17 +203,21 @@ function stripJavascriptDestructuredDefaults(patternText) {
     .trim();
 }
 
+function buildJavascriptLogValueExpression(expressionText) {
+  return `((__autolog_value__) => { if (typeof __autolog_value__ === "string") { return __autolog_value__.replace(/\\r/g, "\\\\r").replace(/\\n/g, "\\\\n"); } if (__autolog_value__ === undefined) { return "undefined"; } try { const __autolog_json__ = JSON.stringify(__autolog_value__); if (typeof __autolog_json__ === "string") { return __autolog_json__; } } catch {} return String(__autolog_value__).replace(/\\r/g, "\\\\r").replace(/\\n/g, "\\\\n"); })(${expressionText})`;
+}
+
 function buildJavascriptRuntimeArgumentExpression(argumentText) {
   const normalized = stripDefaultValue(argumentText).replace(/^\.\.\./, "").trim();
 
   if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(normalized)) {
-    return normalized;
+    return buildJavascriptLogValueExpression(normalized);
   }
 
   if ((normalized.startsWith("{") && normalized.endsWith("}")) || (normalized.startsWith("[") && normalized.endsWith("]"))) {
     const expression = stripJavascriptDestructuredDefaults(normalized);
     if (expression && isCompilableJavascriptExpression(expression)) {
-      return `JSON.stringify(${expression})`;
+      return buildJavascriptLogValueExpression(expression);
     }
     return quoteJavascriptString("<destructured>");
   }
@@ -238,7 +242,7 @@ function buildJavascriptStartStatement(marker) {
 }
 
 function buildJavascriptValueExpression(expressionText) {
-  return `String(${expressionText})`;
+  return buildJavascriptLogValueExpression(expressionText);
 }
 
 function buildJavascriptBlockStatement(marker, action) {
