@@ -1,6 +1,7 @@
 "use strict";
 
 const MARKER_LINE_PATTERN = /^([ \t]*)\/\/\$\$(.*?)\$\$(\r?\n|$)/gm;
+const AUTOLOG_LOG_PREFIX = "[autolog] ";
 
 function escapeDoubleQuotedString(value) {
   return value
@@ -239,27 +240,32 @@ function buildMklog2seqMessage(markerBody) {
   return buildMklog2seqMessageFromParsed(parseMarkerBody(markerBody));
 }
 
-function buildMklog2seqMessageFromParsed({ markerName, metadata }) {
+function buildMarkerLocationPrefix(metadata = {}) {
   const file = metadata.file || "<unknown>";
   const line = metadata.line || "0";
   const func = metadata.func || "<unknown>";
+  return `${AUTOLOG_LOG_PREFIX}${file}:${line}:${func}`;
+}
+
+function buildMklog2seqMessageFromParsed({ markerName, metadata }) {
+  const location = buildMarkerLocationPrefix(metadata);
 
   if (markerName === "START_FUNC") {
     const args = metadata.args || "";
-    return `${file}:${line}:${func}(${args}) start`;
+    return `${location}(${args}) start`;
   }
 
   if (markerName === "RETURN_FUNC") {
     return metadata.expr
-      ? `${file}:${line}:${func} return(${metadata.expr})`
-      : `${file}:${line}:${func} return`;
+      ? `${location} return(${metadata.expr})`
+      : `${location} return`;
   }
 
   if (markerName === "END_FUNC") {
-    return `${file}:${line}:${func} end`;
+    return `${location} end`;
   }
 
-  return `${file}:${line}:${func} ${markerName}`;
+  return `${location} ${markerName}`;
 }
 
 function shouldEmitMarker(markerName) {
@@ -289,6 +295,8 @@ function createMarkerTransformer(buildStatement) {
 }
 
 module.exports = {
+  AUTOLOG_LOG_PREFIX,
+  buildMarkerLocationPrefix,
   buildMklog2seqMessage,
   buildMklog2seqMessageFromParsed,
   createMarkerTransformer,

@@ -1,6 +1,7 @@
 "use strict";
 
 const {
+  buildMarkerLocationPrefix,
   createMarkerTransformer,
   escapeDoubleQuotedString,
   splitArguments,
@@ -225,7 +226,7 @@ function getJavascriptArgumentExpressions(argumentText) {
 }
 
 function buildJavascriptStartStatement(marker) {
-  const prefix = `${marker.metadata.file}:${marker.metadata.line}:${marker.metadata.func}(`;
+  const prefix = `${buildMarkerLocationPrefix(marker.metadata)}(`;
   const suffix = ") start";
   const expressions = getJavascriptArgumentExpressions(marker.metadata.args || "");
 
@@ -242,7 +243,7 @@ function buildJavascriptValueExpression(expressionText) {
 
 function buildJavascriptBlockStatement(marker, action) {
   const kind = marker.markerName.slice(action === "block-start" ? "START_".length : "END_".length);
-  const prefix = `${marker.metadata.file}:${marker.metadata.line}:${marker.metadata.func} ${action}(${kind}`;
+  const prefix = `${buildMarkerLocationPrefix(marker.metadata)} ${action}(${kind}`;
   if (!marker.metadata.expr) {
     return `console.log("${escapeDoubleQuotedString(`${prefix})`)}");`;
   }
@@ -250,7 +251,7 @@ function buildJavascriptBlockStatement(marker, action) {
 }
 
 function buildJavascriptReturnStatement(marker) {
-  const prefix = `${marker.metadata.file}:${marker.metadata.line}:${marker.metadata.func} return`;
+  const prefix = `${buildMarkerLocationPrefix(marker.metadata)} return`;
   if (!marker.metadata.expr) {
     return `console.log("${escapeDoubleQuotedString(prefix)}");`;
   }
